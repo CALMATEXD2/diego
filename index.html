@@ -843,18 +843,36 @@ async function armar(rec){
  }
  return parts.length?new Blob(parts,{type:rec.type||"audio/mp4"}):null;
 }
-/* descarga por segmentos con Range; null si el servidor no soporta rangos */
-async function segmentar(t,url,onp){
- const enc=SECURE;
- let h;try{h=await fetch(url,{headers:{Range:"bytes=0-0"}})}catch(e){return null}
- if(h.status!==206)return null;
- const cr=h.headers.get("content-range")||"",mm=cr.match(/\/(\d+)/);
- const size=mm?+mm[1]:0;
- const type=(h.headers.get("content-type")||"audio/mp4").split(";")[0];
- try{await h.arrayBuffer()}catch(e){}
- if(!size||size<40000)return null;
- const CH=196608,n=Math.ceil(size/CH);
- const k=enc?await ckey():null;
+
+/* ---------- transportes: directo + proxies CORS, se elige el que responda ---------- */
+const PROXIS=[
+ u=>"https://api.allorigins.win/raw?url="+encodeURIComponent(u),
+ u=>"https://api.codetabs.com/v1/proxy/?quest="+encodeURIComponent(u),
+ u=>"https://corsproxy.io/?url="+encodeURIComponent(u),
+ u=>"https://api.cors.lol/?url="+encodeURIComponent(u),
+ u=>"https://proxy.corsfix.com/?"+u
+];
+async function elegir(u){
+ for(const p of [x=>x,...PROXIS]){
+  const c=new AbortController(),tm=setTimeout(()=>c.abort(),9000);
+  try{
+   const r=await fetch(p(u),{signal:c.signal,mode:"cors",headers:{Range:"bytes=0-0"}});
+   clearTimeout(tm);
+   if(!r.ok)continue;
+   const cr=r.headers.get("content-range")||"",mm=cr.match(/\/(\d+)/);
+   const total=mm?+mm[1]:+(r.headers.get("content-length")||0);
+   const tipo=(r.headers.get("content-type")||"").split(";")[0];
+   try{r.body&&r.body.cancel()}catch(e){}
+   if(total<40000)continue;
+   if(r.status===206)return {f:p,total,tipo,rangos:true};
+   return {f:p,total:0,tipo,rangos:false};
+  }catch(e){clearTimeout(tm)}
+ }
+ return null;
+}
+async function segmentar(t,u,tr,onp){
+ const size=tr.total,CH=196608,n=Math.ceil(size/CH);
+ const k=SECURE?await ckey():null;
  await borrarFrags(t.id);
  let hecho=0,sig=0,fallo=false;
  const uno=async i=>{
@@ -862,24 +880,46 @@ async function segmentar(t,url,onp){
   for(let intento=0;intento<3;intento++){
    if(Date.now()>(window.FIN||Infinity))throw new Error("tiempo");
    try{
-    const r=await fetch(url,{headers:{Range:`bytes=${a}-${b}`}});
+    const r=await fetch(tr.f(u),{mode:"cors",headers:{Range:`bytes=${a}-${b}`}});
     if(!r.ok)throw new Error("http"+r.status);
+    if(r.status!==206&&i>0)throw new Error("sin-rangos");
     const buf=await r.arrayBuffer();
     if(!buf.byteLength)throw new Error("vacio");
-    const iv=enc?crypto.getRandomValues(new Uint8Array(12)):null;
-    const data=enc?await crypto.subtle.encrypt({name:"AES-GCM",iv},k,buf):buf;
+    const iv=SECURE?crypto.getRandomValues(new Uint8Array(12)):null;
+    const data=SECURE?await crypto.subtle.encrypt({name:"AES-GCM",iv},k,buf):buf;
     await tx("readwrite",s=>s.put({k:`${t.id}#${i}`,id:t.id,i,iv,data}),"f");
     hecho+=buf.byteLength;onp(hecho,size);
     return;
-   }catch(e){if(intento===2)fallo=true;await new Promise(r=>setTimeout(r,400))}
+   }catch(e){
+    if(intento===1){const otro=await elegir(u);if(otro&&otro.rangos){tr.f=otro.f;tr.total=otro.total}}
+    if(intento===2)fallo=true;
+    await new Promise(r=>setTimeout(r,400));
+   }
   }
  };
  const worker=async()=>{for(;;){const i=sig++;if(i>=n)return;await uno(i)}};
  try{await Promise.all([worker(),worker(),worker()])}catch(e){fallo=true}
  if(fallo&&hecho<size*.6){await borrarFrags(t.id);return null}
- return {frags:n,size,type,enc};
+ return {frags:n,size,tipo:tr.tipo,enc:SECURE};
 }
+async function bloqueUnico(t,u,tr,onp){
+ const r=await fetch(tr.f(u),{mode:"cors"});
+ if(!r.ok)throw new Error("http"+r.status);
+ const total=+(r.headers.get("content-length")||0);
+ const rd=r.body.getReader(),parts=[];let g=0;
+ for(;;){const{done,value}=await rd.read();if(done)break;parts.push(value);g+=value.length;if(total)onp(g,total)}
+ const buf=await new Blob(parts).arrayBuffer();
+ if(buf.byteLength<40000)throw new Error("corto");
+ const k=SECURE?await ckey():null;
+ const iv=SECURE?crypto.getRandomValues(new Uint8Array(12)):null;
+ const data=SECURE?await crypto.subtle.encrypt({name:"AES-GCM",iv},k,buf):buf;
+ await borrarFrags(t.id);
+ await tx("readwrite",s=>s.put({k:`${t.id}#0`,id:t.id,i:0,iv,data}),"f");
+ return {frags:1,size:buf.byteLength,tipo:r.headers.get("content-type")||"audio/mp4",enc:SECURE};
+}
+window.elegir=elegir;
 window.segmentar=segmentar;
+window.bloqueUnico=bloqueUnico;
 window.borrarFrags=borrarFrags;
 
 window.loc=[];
@@ -898,7 +938,7 @@ document.addEventListener("click",async e=>{const d=e.target.closest("[data-del]
 
 /* ---------- audio ---------- */
 const mk=()=>{const a=new Audio();a.preload="auto";return a};
-const au=mk(),aux=mk();
+const au=mk(),aux=mk();aux.crossOrigin="anonymous";
 let el=au,actx=null,an=null,fd=null,adapter=null;
 let dest=null,rec=null,capturando=false,netTry=0,setup=false,lastBlobURL=null;
 const PAPI=["https://pipedapi.kavin.rocks","https://pipedapi.adminforge.de","https://api.piped.private.coffee","https://pipedapi.drgns.space"];
@@ -989,10 +1029,11 @@ function dnode(){const c=graph();if(!c)return null;if(!dest){dest=c.createMediaS
 async function grabar(t){
  if(!window.MediaRecorder)return null;
  if(el!==aux){
-  const u=el.dataset.url;if(!u)return null;
+  const u0=el.dataset.url;if(!u0)return null;
+  const u=PROXIS.some(p=>u0.includes("proxy"))?u0:PROXIS[0](u0);
   setup=true;const prev=el;el=aux;el.volume=vol/100;el.src=u;
   try{await el.play()}catch(e){}
-  await new Promise(r=>setTimeout(r,1200));
+  await new Promise(r=>setTimeout(r,1400));
   if(el.readyState<2){el=prev;setup=false;return null}
   setup=false;
  }
@@ -1129,7 +1170,7 @@ const btns=[b1,b2];
 const view=document.createElement("div");
 view.className="view";view.id="view-dl";
 view.innerHTML=`<section style="margin-top:14px"><div class="sec-head"><h3>Descargas</h3><span id="dl-count"></span></div>
-<div class="off-card"><b>Guardá para escuchar sin internet</b><p>Poné la canción y tocá la flecha ⤓. El audio se baja por fragmentos de 192 KB, cada bloque se cifra con AES-GCM y queda en este dispositivo; al reproducir se descifran y se unen. Si un bloque falla, se reintenta solo.</p></div>
+<div class="off-card"><b>Guardá para escuchar sin internet</b><p>Poné la canción y tocá la flecha ⤓. El audio se baja por fragmentos de 192 KB a través de un proxy, cada bloque se cifra con AES-GCM y queda en este dispositivo; al reproducir se descifran y se unen. Si un bloque falla, se reintenta y se cambia de proxy.</p></div>
 <div class="tracks" id="dl-tracks"></div></section>`;
 $("#main").appendChild(view);
 const nb=document.createElement("button");
@@ -1161,8 +1202,8 @@ refresh=async function(){
 function syncDl(){const on=!!cur&&dl.some(d=>d.id===cur.id);btns.forEach(b=>b.classList.toggle("on",on))}
 
 const PROXIES=[
- u=>"https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(u),
  u=>"https://api.allorigins.win/raw?url="+encodeURIComponent(u),
+ u=>"https://api.codetabs.com/v1/proxy/?quest="+encodeURIComponent(u),
  u=>"https://corsproxy.io/?url="+encodeURIComponent(u)
 ];
 async function fetchBlob(u,ms,onp){
@@ -1182,13 +1223,6 @@ async function fetchBlob(u,ms,onp){
   if(bl.size<20000)throw new Error("corto");
   return bl;
  }finally{clearTimeout(t);if(stall)clearInterval(stall)}
-}
-async function baja(u,pct,ms){
- try{const bl=await fetchBlob(u,ms,pct);if(bl)return bl}catch(e){}
- for(const p of PROXIES){
-  try{const bl=await fetchBlob(p(u),24000,pct);if(bl)return bl}catch(e){}
- }
- return null;
 }
 async function thumbData(u){
  if(!u)return"";
@@ -1216,27 +1250,36 @@ async function doDownload(t){
  if(busy)return;
  if(t.local)return toast("Esa canción ya está guardada");
  if(dl.some(d=>d.id===t.id))return toast("Ya está en Descargas");
- busy=true;window.FIN=Date.now()+180000;
+ busy=true;window.FIN=Date.now()+240000;
  btns.forEach(b=>{b.classList.add("busy");b.classList.remove("on")});
  const pct=(g,tot)=>toast("Descargando fragmentos… "+Math.min(99,Math.round(g/tot*100))+"%");
- toast("Conectando…");
+ toast("Buscando fuente…");
  try{
-  let url=null;
-  for(const b of INV){for(const it of ["140","251"]){const u=`${b}/latest_version?id=${t.id}&itag=${it}&local=true`;if(await window.probe(u)){url=u;break}}if(url)break}
-  if(!url)for(const b of PIPED_API){try{const j=await fj(`${b}/streams/${t.id}`,8000);
+  const cands=[];
+  for(const b of PIPED_API){try{const j=await fj(`${b}/streams/${t.id}`,8000);
     const a=(j.audioStreams||[]).filter(x=>x&&x.url&&!x.videoOnly).sort((x,y)=>(y.bitrate||0)-(x.bitrate||0));
-    if(a.length){url=a[0].url;break}}catch(e){}}
-  if(url){
-   const man=await window.segmentar(t,url,pct);
-   if(man)return await guardar(t,man);
-   const bl=await baja(url,pct,60000);
-   if(bl)return await guardar(t,{blob:bl,type:bl.type});
+    if(a.length){cands.push(a[0].url);break}}catch(e){}}
+  for(const b of INV){for(const it of ["140","251"])cands.push(`${b}/latest_version?id=${t.id}&itag=${it}&local=true`)}
+  for(const u of cands){
+   if(Date.now()>window.FIN)break;
+   const tr=await window.elegir(u);
+   if(!tr)continue;
+   try{
+    if(tr.rangos){
+     const man=await window.segmentar(t,u,tr,pct);
+     if(man)return await guardar(t,man);
+    }else{
+     toast("Transporte sin rangos · bloque único…");
+     const man=await window.bloqueUnico(t,u,tr,pct);
+     if(man)return await guardar(t,man);
+    }
+   }catch(e){}
   }
-  toast("Sin rangos · grabando en tiempo real…");
+  toast("Sin transporte · grabando en tiempo real…");
   if(!(cur&&cur.id===t.id)){queue=[t];prevStack=[];load(0);await new Promise(r=>setTimeout(r,1600))}
   const bl=await window.grabar(t);
   if(bl&&bl.size>15000)return await guardar(t,{blob:bl,type:bl.type});
-  toast("No se pudo. Probá de nuevo.");
+  toast("No se pudo. Reintentá en un rato.");
  }finally{busy=false;window.FIN=0;btns.forEach(b=>b.classList.remove("busy"));syncDl()}
 }
 

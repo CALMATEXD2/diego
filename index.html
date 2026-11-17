@@ -378,6 +378,21 @@ body.sheet-on::after{content:"";position:fixed;inset:0;z-index:34;background:rgb
  .xrow{gap:5px}.xrow button{padding:8px 6px}
 }
 @media(prefers-reduced-motion:reduce){body::before,.hero-art,.card,.track{animation:none}}
+
+/* ===== Video arriba + letra abajo ===== */
+body.sheet-on #yt-host{z-index:36;border-radius:18px}
+#yt-host{cursor:pointer}
+.sn-art,.sn-art{aspect-ratio:16/9;height:auto;min-height:0;max-height:none;width:min(100%,calc(36vh*16/9));margin:12px auto 0;border-radius:18px}
+@media(min-width:781px){.sn{max-width:760px}.sn-art{height:auto;max-height:none}}
+@media(max-width:780px){.sn-art{height:auto;min-height:0;max-height:none;margin-top:10px;border-radius:16px}}
+.art-disc{height:78%}
+#p-lyr{-webkit-mask-image:linear-gradient(180deg,transparent,#000 12%,#000 88%,transparent);mask-image:linear-gradient(180deg,transparent,#000 12%,#000 88%,transparent)}
+#lyrLines{padding:22% 0 32%}
+.ln{font-size:clamp(18px,4.6vw,25px);text-align:center;color:#8a8a94;padding:7px 12px;opacity:calc(1 - var(--d,0)*.17);transition:color .3s,transform .3s,opacity .3s}
+.ln.on{opacity:1;color:#fff;transform:scale(1.05);text-shadow:0 0 26px var(--glow)}
+.ln.plain{opacity:1;font-size:15px;color:#d8d8de;transform:none}
+#p-lyr .empty{text-align:center;padding:30px 12px}
+.sn-body{margin-top:6px}
 </style>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 </head>
@@ -533,17 +548,17 @@ body.sheet-on::after{content:"";position:fixed;inset:0;z-index:34;background:rgb
  <button data-view="lib"><svg class="i"><use href="#i-lib"/></svg><span>Historial</span></button>
 </nav>
 
-<div class="sn" data-t="vid">
+<div class="sn" data-t="lyr">
  <div class="sn-bg"></div><div class="sn-grad"></div>
  <div class="sn-head"><div class="sn-logo"><svg><use href="#logo-cx"/></svg></div><div class="sn-name">CALMATEX</div><button class="sn-x" id="snClose"><svg class="i"><use href="#i-down"/></svg></button></div>
  <div class="sn-prog" id="sn-bar"><div class="fill" id="sn-fill"></div></div>
  <div class="sn-art" id="sheetSlot"><div class="art"><div class="art-bg"></div><canvas class="art-cv"></canvas><div class="art-disc"></div></div></div>
  <div class="sn-body">
-  <div class="sn-pane on" id="p-vid">
+  <div class="sn-pane" id="p-vid">
    <div class="big" id="bigText"></div>
    <div class="xrow"><button id="x-sleep"><svg class="i"><use href="#i-moon"/></svg><b>Temporizador</b><span>Apagado</span></button><button id="x-clip"><svg class="i"><use href="#i-video"/></svg><b>Video</b><span>Sí</span></button><button id="x-speed"><svg class="i"><use href="#i-gauge"/></svg><b>Velocidad</b><span>1x</span></button><button id="x-share"><svg class="i"><use href="#i-share"/></svg><b>Compartir</b><span>Link</span></button></div>
   </div>
-  <div class="sn-pane" id="p-lyr"><div id="lyrLines"></div></div>
+  <div class="sn-pane on" id="p-lyr"><div id="lyrLines"></div></div>
   <div class="sn-pane" id="p-que"><div id="sn-queue"></div></div>
   <div class="sn-pane" id="p-sim"><div class="tracks" id="sn-sim"><p class="empty">Cargando...</p></div></div>
  </div>
@@ -563,8 +578,8 @@ body.sheet-on::after{content:"";position:fixed;inset:0;z-index:34;background:rgb
  <div class="sn-tabs">
   <button id="sn-shuf"><svg class="i" style="width:14px;height:14px"><use href="#i-shuffle"/></svg></button>
   <span class="sp"></span>
-  <button data-t="vid" class="on">Ahora</button>
-  <button data-t="lyr">Letra</button>
+  <button data-t="lyr" class="on">Video+Letra</button>
+  <button data-t="vid">Ajustes</button>
   <button data-t="que">Cola</button>
   <button data-t="sim">Similares</button>
   <span class="sp"></span>
@@ -768,10 +783,11 @@ placeHost();loadTrend();
 <script>
 (()=>{
 const B=document.body,sn=$(".sn");
-let lyr={s:null,p:"",msg:""},tab="vid",lastLn=-1,sleepI=0,sleepT,spdI=0,wl=null,simFor=null,swMoved=false;
+let lyr={s:null,p:"",msg:""},tab="lyr",lastLn=-1,sleepI=0,sleepT,spdI=0,wl=null,simFor=null,swMoved=false;
 const open=()=>B.classList.contains("sheet-on");
 function openSheet(){B.classList.add("sheet-on");const t0=performance.now();(function f(){placeHost();if(performance.now()-t0<420)requestAnimationFrame(f)})();if(cur)getLyrics(cur);syncPlay();window.syncVideo&&syncVideo();big(lastLn)}
 function closeSheet(){B.classList.remove("sheet-on");placeHost()}
+window.openSheet=openSheet;window.closeSheet=closeSheet;
 placeHost=function(){const h=$("#yt-host");
  if(B.classList.contains("stage-on")){h.style.cssText="left:0;top:0;width:100vw;height:100vh;border-radius:0";return}
  const s=open()?$("#sheetSlot"):$("#vidslot"),r=s.getBoundingClientRect();
@@ -885,7 +901,7 @@ function syncVideo(){
  if(ytReady&&cur){try{yt.mute();yt.loadVideoById(cur.id,Math.floor(adapter.getCurrentTime()))}catch(e){}}
  placeHost();
 }
-window.syncVideo=syncVideo;
+window.syncVideo=syncVideo;window.ytCtl=()=>ytReady?yt:null;
 window.onYouTubeIframeAPIReady=()=>{syncVideo()};
 const _pl=placeHost;
 placeHost=function(){const h=$("#yt-host");
@@ -1409,5 +1425,25 @@ document.addEventListener("keydown",e=>{if(/INPUT|TEXTAREA/.test(e.target.tagNam
  else if(e.key==="ArrowDown"){e.preventDefault();vol=Math.max(0,vol-5);applyVol()}});
 })();
 </script>
+<script>
+(()=>{
+const B=document.body,Y=()=>window.ytCtl&&window.ytCtl(),vis=()=>B.classList.contains("sheet-on")||B.classList.contains("stage-on");
+const isA=e=>e.target&&e.target.tagName==="AUDIO",T=()=>adapter.getCurrentTime();
+/* el video (mudo) sigue siempre al audio */
+document.addEventListener("playing",e=>{if(!isA(e))return;const y=Y();if(y&&vis())try{y.seekTo(T(),true);y.playVideo()}catch(x){}},true);
+document.addEventListener("pause",e=>{if(!isA(e))return;const y=Y();if(y)try{y.pauseVideo()}catch(x){}},true);
+document.addEventListener("seeked",e=>{if(!isA(e))return;const y=Y();if(y&&vis())try{y.seekTo(T(),true)}catch(x){}},true);
+document.addEventListener("ratechange",e=>{if(!isA(e))return;const y=Y();if(y)try{y.setPlaybackRate(e.target.playbackRate)}catch(x){}},true);
+setInterval(()=>{const y=Y();if(!y||!playing||!vis()||!cur||cur.local)return;
+ try{const t=T(),d=y.getCurrentTime();if(Math.abs(d-t)>.8)y.seekTo(t,true);const st=y.getPlayerState();if(st!==1&&st!==3)y.playVideo()}catch(x){}},1500);
+$("#yt-host").addEventListener("click",()=>{if(B.classList.contains("sheet-on"))togglePlay()});
+/* al elegir una canción se abre sola la pantalla video + letra */
+let want=false,wt;
+document.addEventListener("click",e=>{
+ if(e.target.closest(".track[data-l],.ftile,#favPlay,#favShuf,#heroPlay,#random")&&!e.target.closest(".heart,.del,.dl-btn")){want=true;clearTimeout(wt);wt=setTimeout(()=>want=false,12000)}},true);
+const _l2=load;load=function(i){_l2(i);if(want&&cur){want=false;window.openSheet&&openSheet()}};
+})();
+</script>
+
 
 </html>

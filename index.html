@@ -999,16 +999,20 @@ async function borrarFrags(id){
   if(mios.length)await tx("readwrite",s=>{mios.forEach(k=>s.delete(k))},"f");
  }catch(e){}
 }
+/* estricto: si falta un fragmento o el tamaño no coincide, devuelve null en vez de audio cortado */
 async function armar(rec){
  if(rec.blob)return rec.blob;
+ if(!rec.frags)return null;
  const k=rec.enc&&SECURE?await ckey():null;
  const parts=[];
  for(let i=0;i<rec.frags;i++){
   const fr=await tx("readonly",s=>s.get(rec.id+"#"+i),"f");
-  if(!fr)continue;
+  if(!fr)return null;
   parts.push(k&&fr.iv?await crypto.subtle.decrypt({name:"AES-GCM",iv:fr.iv},k,fr.data):fr.data);
  }
- return parts.length?new Blob(parts,{type:rec.type||"audio/mp4"}):null;
+ const bl=new Blob(parts,{type:rec.type||"audio/mp4"});
+ if(rec.size&&bl.size!==rec.size)return null;
+ return bl;
 }
 
 /* ---------- transportes: directo + proxies CORS, se elige el que responda ---------- */
@@ -1072,6 +1076,8 @@ async function segmentar(t,u,tr,onp){
 async function bloqueUnico(t,u,tr,onp){
  const r=await fetch(tr.f(u),{mode:"cors"});
  if(!r.ok)throw new Error("http"+r.status);
+ const ct=(r.headers.get("content-type")||"").toLowerCase();
+ if(ct.includes("html")||ct.includes("json")||ct.includes("xml"))throw new Error("no-audio");
  const total=+(r.headers.get("content-length")||0);
  const rd=r.body.getReader(),parts=[];let g=0;
  for(;;){const{done,value}=await rd.read();if(done)break;parts.push(value);g+=value.length;if(total)onp(g,total)}
@@ -1082,17 +1088,16 @@ async function bloqueUnico(t,u,tr,onp){
  const data=SECURE?await crypto.subtle.encrypt({name:"AES-GCM",iv},k,buf):buf;
  await borrarFrags(t.id);
  await tx("readwrite",s=>s.put({k:`${t.id}#0`,id:t.id,i:0,iv,data}),"f");
- return {frags:1,size:buf.byteLength,tipo:r.headers.get("content-type")||"audio/mp4",enc:SECURE};
+ return {frags:1,size:buf.byteLength,tipo:ct||"audio/mp4",enc:SECURE};
 }
 window.elegir=elegir;
 window.segmentar=segmentar;
 window.bloqueUnico=bloqueUnico;
-window.borrarFrags=borrarFrags;window.armar=armar;window.__resolve=id=>resolveURL(id,true);
+window.borrarFrags=borrarFrags;window.armar=armar;
 
 window.loc=[];
 window.renderOff=function(){lists.off=loc;$("#off-count").textContent=loc.length+" ARCHIVOS";
  $("#off-tracks").innerHTML=loc.length?loc.map((t,i)=>row(t,i,"off").replace('class="track','class="track loc').replace('<button class="heart',`<button class="del" data-del="${esc(t.id)}" aria-label="Borrar">×</button><button class="heart`)).join(""):'<p class="empty">Todavía no importaste audio.</p>'};
-window.refresh=async function(){try{const all=await tx("readonly",s=>s.getAll());window.loc=all.filter(x=>!x.dl).map(({blob,...m})=>m).sort((a,b)=>b.at-a.at);renderOff()}catch(e){$("#off-tracks").innerHTML='<p class="empty">Este navegador no permite guardar archivos.</p>'}};
 const dOf=f=>new Promise(r=>{const a=new Audio(),u=URL.createObjectURL(f);a.preload="metadata";a.onloadedmetadata=()=>{URL.revokeObjectURL(u);r(a.duration||0)};a.onerror=()=>r(0);a.src=u;setTimeout(()=>r(0),4000)});
 $("#offAdd").onclick=()=>$("#offFile").click();
 $("#offFile").onchange=async e=>{let n=0;for(const f of e.target.files){if(!/^audio\//.test(f.type)&&!/\.(mp3|m4a|wav|ogg|flac|aac|opus)$/i.test(f.name))continue;
@@ -1157,14 +1162,15 @@ window.adapter=adapter={
   if(!cur||cur.id!==id)return;
   netTry=0;
   if(r&&(r.blob||r.frags)){
-   let bl=r.blob;
-   if(!bl){toast("Armando desde fragmentos…");bl=await armar(r);if(!bl)return toast("Faltan fragmentos")}
-   if(lastBlobURL){URL.revokeObjectURL(lastBlobURL);lastBlobURL=null}
-   try{au.pause();aux.pause()}catch(e){}
-   el=au;const u=URL.createObjectURL(bl);lastBlobURL=u;
-   el.dataset.url=u;delete el.dataset.net;el.volume=vol/100;el.src=u;
-   try{await el.play()}catch(e){toast("Tocá play para continuar")}
-   return;
+   const bl=r.blob||await armar(r);
+   if(bl){
+    if(lastBlobURL){URL.revokeObjectURL(lastBlobURL);lastBlobURL=null}
+    try{au.pause();aux.pause()}catch(e){}
+    el=au;const u=URL.createObjectURL(bl);lastBlobURL=u;
+    el.dataset.url=u;delete el.dataset.net;el.volume=vol/100;el.src=u;
+    try{await el.play()}catch(e){toast("Tocá play para continuar")}
+    return;
+   }
   }
   playStream(id);
  },
@@ -1244,7 +1250,6 @@ window.testHosts=async()=>{
 };
 
 const _l=load;load=function(i){_l(i);setArt(cur);placeHost();syncVideo()};
-refresh();
 })();
 </script>
 <script>
@@ -1268,22 +1273,32 @@ favUI();
 </script>
 <script>
 (()=>{
-/* ===== YouTube Music + descargas por fragmentos ===== */
+/* ===== YouTube Music + descargas (motor v2) ===== */
+const CIFRAR=true,CH=262144,MAXW=4;
+const SECURE=!!(window.crypto&&crypto.subtle&&crypto.getRandomValues);
 const stl=document.createElement("style");
 stl.textContent=`
 .dl-btn{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;color:var(--dim);flex:none;transition:.15s}
 .dl-btn:hover{color:var(--txt);background:var(--s2)}
 .dl-btn.on{color:var(--brand)}
-.dl-btn.busy{color:var(--brand);animation:pulse 1s infinite}
-@keyframes pulse{50%{opacity:.3}}
+.dl-btn.busy{color:#fff;background:conic-gradient(var(--brand) var(--p,0%),rgba(255,255,255,.16) 0)}
 .sn-side .dl-btn{width:52px;height:52px;color:#fff;background:rgba(255,255,255,.12);backdrop-filter:blur(10px)}
-.sn-side .dl-btn.on{color:var(--brand)}`;
+.sn-side .dl-btn.on{color:var(--brand)}
+.sn-side .dl-btn.busy{background:conic-gradient(var(--brand) var(--p,0%),rgba(255,255,255,.12) 0)}`;
 document.head.appendChild(stl);
 
-const INV=["https://yt.chocolatemoo53.com","https://inv.nadeko.net","https://invidious.nerdvpn.de","https://invidious.tiekoetter.com"];
+const INVID=["https://inv.nadeko.net","https://invidious.nerdvpn.de","https://yt.chocolatemoo53.com","https://iv.melmac.space","https://inv.tux.pizza","https://yewtu.be","https://invidious.f5.si"];
 const PIPED_API=["https://pipedapi.kavin.rocks","https://pipedapi.adminforge.de","https://api.piped.private.coffee","https://pipedapi.drgns.space"];
+const COBALT=["https://cobalt-api.kwiatekmiki.com","https://cobalt-backend.canine.tools","https://api.cobalt.tools"];
+const PROXIES=[
+ u=>"https://api.allorigins.win/raw?url="+encodeURIComponent(u),
+ u=>"https://api.codetabs.com/v1/proxy/?quest="+encodeURIComponent(u),
+ u=>"https://corsproxy.io/?url="+encodeURIComponent(u),
+ u=>"https://api.cors.lol/?url="+encodeURIComponent(u),
+ u=>"https://proxy.corsfix.com/?"+u];
 const YTM_KEY="AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30";
 const thumbOf=id=>`https://i.ytimg.com/vi/${id}/mqdefault.jpg`;
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 function walk(o,fn){if(!o||typeof o!=="object")return;if(Array.isArray(o)){for(const x of o)walk(x,fn);return}fn(o);for(const k in o)walk(o[k],fn)}
 function txt(o){const s=[];walk(o,r=>{if(typeof r.text==="string")s.push(r.text)});return s.join(" ").trim()}
 async function ytm(q){
@@ -1316,7 +1331,7 @@ search=async function(q){
   return (j.items||[]).map(i=>({id:i.id.videoId,title:dec(i.snippet.title),artist:dec(i.snippet.channelTitle),thumb:i.snippet.thumbnails?.medium?.url||thumbOf(i.id.videoId),dur:0})).filter(x=>x.id);
  }
  try{const r=await ytm(q);if(r.length)return r}catch(e){}
- for(const b of INV){
+ for(const b of INVID){
   try{
    const j=await fj(`${b}/api/v1/search?q=${encodeURIComponent(q)}&type=video`,7000);
    const it=(j||[]).filter(x=>x.videoId&&(x.lengthSeconds||0)<1500);
@@ -1327,6 +1342,162 @@ search=async function(q){
  throw new Error("Sin conexión con el buscador");
 };
 
+/* ---------- claves locales para este bloque ---------- */
+let CK=null;
+async function ck(){
+ if(!SECURE)return null;
+ if(CK)return CK;
+ let raw=null;try{raw=localStorage.getItem("nova_k")}catch(e){}
+ if(!raw){
+  const k=await crypto.subtle.generateKey({name:"AES-GCM",length:256},true,["encrypt","decrypt"]);
+  raw=JSON.stringify(await crypto.subtle.exportKey("jwk",k));
+  try{localStorage.setItem("nova_k",raw)}catch(e){}
+ }
+ CK=await crypto.subtle.importKey("jwk",JSON.parse(raw),{name:"AES-GCM"},false,["encrypt","decrypt"]);
+ return CK;
+}
+async function limpiar(id){
+ try{const ks=await tx("readonly",s=>s.getAllKeys(),"f");
+  const m=ks.filter(k=>k.startsWith(id+"#"));
+  if(m.length)await tx("readwrite",s=>m.forEach(k=>s.delete(k)),"f")}catch(e){}
+}
+async function contar(id){
+ try{const ks=await tx("readonly",s=>s.getAllKeys(),"f");return ks.filter(k=>k.startsWith(id+"#")).length}catch(e){return 0}
+}
+
+/* ---------- fuentes: cada una sirve el archivo desde su host ---------- */
+async function fuentes(t){
+ const out=[],add=u=>{if(u&&!out.includes(u))out.push(u)};
+ for(const c of COBALT){
+  try{
+   const r=await fetch(c.replace(/\/$/,"")+"/",{method:"POST",mode:"cors",
+    headers:{"Content-Type":"application/json",Accept:"application/json"},
+    body:JSON.stringify({url:"https://music.youtube.com/watch?v="+t.id,downloadMode:"audio",audioFormat:"best",filenameStyle:"basic"})});
+   if(!r.ok)continue;
+   const j=await r.json();
+   if(j.status==="error")continue;
+   add(j.url);(j.picker||[]).forEach(p=>add(p.url));
+   if(out.length)break;
+  }catch(e){}
+ }
+ for(const it of ["251","140"])for(const h of INVID)add(`${h}/latest_version?id=${t.id}&itag=${it}&local=true`);
+ for(const b of PIPED_API){
+  try{const j=await fj(`${b}/streams/${t.id}`,6000);
+   (j.audioStreams||[]).filter(x=>x&&x.url&&!x.videoOnly)
+    .sort((x,y)=>(y.bitrate||0)-(x.bitrate||0)).forEach(x=>add(x.url))}catch(e){}
+ }
+ return out;
+}
+/* sonda: dice si esa URL deja bajar y si respeta rangos */
+async function probar(u){
+ const c=new AbortController(),tm=setTimeout(()=>c.abort(),9000);
+ try{
+  const r=await fetch(u,{mode:"cors",signal:c.signal,headers:{Range:"bytes=0-1"}});
+  if(!r.ok&&r.status!==206)return null;
+  const ct=(r.headers.get("content-type")||"").toLowerCase();
+  if(/text\/html|application\/json|text\/xml/.test(ct))return null;
+  const m=(r.headers.get("content-range")||"").match(/\/(\d+)/);
+  const total=m?+m[1]:+(r.headers.get("content-length")||0);
+  try{r.body&&r.body.cancel()}catch(e){}
+  if(!total&&r.status!==200)return null;
+  return {ranges:r.status===206&&total>0,total,tipo:(ct||"audio/mp4").split(";")[0]};
+ }catch(e){return null}finally{clearTimeout(tm)}
+}
+async function transporte(u){
+ const propio=await probar(u);
+ if(propio)return {f:x=>x,...propio};
+ for(const p of PROXIES){const r=await probar(p(u));if(r)return {f:p,...r}}
+ return null;
+}
+async function primera(cands){
+ const cola=[...cands];
+ const w=async()=>{while(cola.length){const u=cola.shift();const tr=await transporte(u);if(tr)return {u,...tr}}return null};
+ const r=await Promise.all(Array.from({length:Math.min(4,cola.length)},w));
+ return r.find(Boolean)||null;
+}
+
+/* ---------- descarga ---------- */
+let CANCEL=false,ultPct=-1;
+const aborted=()=>CANCEL||(window.FIN&&Date.now()>window.FIN);
+const paso=(g,tot)=>{const p=Math.min(99,Math.round(g/tot*100));if(p===ultPct)return;ultPct=p;btns.forEach(b=>b.style.setProperty("--p",p+"%"))};
+
+async function porFragmentos(t,u,tr){
+ const size=tr.total,n=Math.ceil(size/CH),k=CIFRAR&&SECURE?await ck():null;
+ const prev=await tx("readonly",s=>s.get(t.id));
+ let hechos=0;
+ if(prev&&prev.parcial&&prev.size===size&&prev.frags===n){
+  hechos=await contar(t.id);
+ }else{
+  await limpiar(t.id);
+  await tx("readwrite",s=>s.put({id:t.id,title:t.title,artist:t.artist,dur:t.dur||0,at:Date.now(),thumb:t.thumb,frags:n,size,tipo:tr.tipo,enc:!!k,parcial:true}));
+ }
+ const faltan=[];
+ for(let i=0;i<n;i++)faltan.push(i);
+ if(hechos){
+  const ks=new Set(await tx("readonly",s=>s.getAllKeys(),"f"));
+  for(let i=n-1;i>=0;i--)if(ks.has(`${t.id}#${i}`))faltan.splice(i,1);
+ }
+ let listo=n-faltan.length;
+ const uno=async i=>{
+  const a=i*CH,b=Math.min(size-1,a+CH-1),esp=b-a+1;
+  for(let v=0;v<4;v++){
+   if(aborted())throw {cancelada:true};
+   try{
+    const r=await fetch(tr.f(u),{mode:"cors",headers:{Range:`bytes=${a}-${b}`}});
+    if(r.status!==206)throw 0;
+    const buf=await r.arrayBuffer();
+    if(buf.byteLength<esp)throw 0;
+    const iv=k?crypto.getRandomValues(new Uint8Array(12)):null;
+    const data=k?await crypto.subtle.encrypt({name:"AES-GCM",iv},k,buf):buf;
+    await tx("readwrite",s=>s.put({k:`${t.id}#${i}`,id:t.id,i,iv,data}),"f");
+    listo++;paso(listo,n);return;
+   }catch(e){if(e&&e.cancelada)throw e;await sleep(400*(v+1))}
+  }
+ };
+ const cola=[...faltan];
+ const w=async()=>{while(cola.length)await uno(cola.shift())};
+ try{await Promise.all(Array.from({length:Math.min(MAXW,cola.length)},w))}catch(e){if(e&&e.cancelada)throw e}
+ if(await contar(t.id)<n)return null;
+ return {frags:n,size,tipo:tr.tipo,enc:!!k};
+}
+async function bloque(t,u,tr){
+ const r=await fetch(tr.f(u),{mode:"cors"});
+ if(!r.ok)throw 0;
+ const ct=(r.headers.get("content-type")||"").toLowerCase();
+ if(/text\/html|json|xml/.test(ct))throw 0;
+ const total=+(r.headers.get("content-length")||0);
+ const rd=r.body.getReader(),parts=[];let g=0;
+ for(;;){
+  const{done,value}=await rd.read();if(done)break;
+  parts.push(value);g+=value.length;if(total)paso(g,total);
+  if(aborted()){try{rd.cancel()}catch(e){};throw {cancelada:true}}
+ }
+ if(g<40000)throw 0;
+ const buf=await new Blob(parts).arrayBuffer();
+ const k=CIFRAR&&SECURE?await ck():null;
+ const iv=k?crypto.getRandomValues(new Uint8Array(12)):null;
+ const data=k?await crypto.subtle.encrypt({name:"AES-GCM",iv},k,buf):buf;
+ await limpiar(t.id);
+ await tx("readwrite",s=>s.put({k:`${t.id}#0`,id:t.id,i:0,iv,data}),"f");
+ return {frags:1,size:buf.byteLength,tipo:ct||"audio/mp4",enc:!!k};
+}
+async function descargar(t){
+ const cands=await fuentes(t);
+ if(!cands.length)return null;
+ const usados=new Set();
+ for(let ronda=0;ronda<3&&!aborted();ronda++){
+  const tr=await primera(cands.filter(c=>!usados.has(c)));
+  if(!tr)return null;
+  usados.add(tr.u);
+  try{
+   const man=tr.ranges&&tr.total>40000?await porFragmentos(t,tr.u,tr):await bloque(t,tr.u,tr);
+   if(man)return man;
+  }catch(e){if(e&&e.cancelada)throw e}
+ }
+ return null;
+}
+
+/* ---------- UI ---------- */
 function mkDl(){
  const b=document.createElement("button");
  b.className="dl-btn";b.title="Descargar para escuchar sin internet";
@@ -1342,7 +1513,8 @@ const btns=[b1,b2];
 const view=document.createElement("div");
 view.className="view";view.id="view-dl";
 view.innerHTML=`<section style="margin-top:14px"><div class="sec-head"><h3>Descargas</h3><span id="dl-count"></span></div>
-<div class="off-card"><b>Guardá para escuchar sin internet</b><p>Poné la canción y tocá la flecha ⤓. El audio se baja por fragmentos de 192 KB a través de un proxy, cada bloque se cifra con AES-GCM y queda en este dispositivo; al reproducir se descifran y se unen. Si un bloque falla, se reintenta y se cambia de proxy.</p></div>
+<div class="off-card"><b>Guardá para escuchar sin internet</b><p>Poné la canción y tocá la flecha ⤓. Primero se comprueba si la fuente deja bajar por partes: si sí, baja en paralelo y reanuda donde quedó; si no, baja de una sola pieza. Cada bloque se cifra con AES-GCM y queda en este dispositivo, y al reproducir se descifran y se unen verificando que el tamaño coincida. Si una fuente falla, se pasa a la siguiente.</p>
+<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap"><button class="btn-main" id="dlAll">DESCARGAR ESTA LISTA</button><button class="btn-out" id="dlStop">DETENER</button></div></div>
 <div class="tracks" id="dl-tracks"></div></section>`;
 $("#main").appendChild(view);
 const nb=document.createElement("button");
@@ -1367,35 +1539,12 @@ refresh=async function(){
  try{
   const all=await tx("readonly",s=>s.getAll());
   dl=all.filter(x=>x.dl).map(({blob,...m})=>m).sort((a,b)=>b.at-a.at);
-  window.loc=all.filter(x=>!x.dl).map(({blob,...m})=>m).sort((a,b)=>b.at-a.at);
+  window.loc=all.filter(x=>!x.dl&&!x.parcial).map(({blob,...m})=>m).sort((a,b)=>b.at-a.at);
   renderOff();renderDl();syncDl();
  }catch(e){$("#off-tracks").innerHTML='<p class="empty">Este navegador no permite guardar archivos.</p>'}
 };
 function syncDl(){const on=!!cur&&dl.some(d=>d.id===cur.id);btns.forEach(b=>b.classList.toggle("on",on))}
 
-const PROXIES=[
- u=>"https://api.allorigins.win/raw?url="+encodeURIComponent(u),
- u=>"https://api.codetabs.com/v1/proxy/?quest="+encodeURIComponent(u),
- u=>"https://corsproxy.io/?url="+encodeURIComponent(u)
-];
-async function fetchBlob(u,ms,onp){
- const c=new AbortController(),t=setTimeout(()=>c.abort(),ms||24000);
- let stall=null,last=Date.now(),got=0;
- try{
-  const r=await fetch(u,{signal:c.signal,mode:"cors",redirect:"follow"});
-  if(!r.ok)throw new Error("http"+r.status);
-  const ct=(r.headers.get("content-type")||"").toLowerCase();
-  if(ct.includes("html")||ct.includes("json")||ct.includes("xml"))throw new Error("no-audio");
-  const total=+(r.headers.get("content-length")||0);
-  if(!r.body){const bl=await r.blob();if(bl.size<20000)throw new Error("corto");return bl}
-  stall=setInterval(()=>{if(Date.now()-last>12000)c.abort()},1500);
-  const rd=r.body.getReader(),parts=[];
-  for(;;){const{done,value}=await rd.read();if(done)break;parts.push(value);got+=value.length;last=Date.now();if(onp&&total)onp(got,total)}
-  const bl=new Blob(parts,{type:ct||"audio/mp4"});
-  if(bl.size<20000)throw new Error("corto");
-  return bl;
- }finally{clearTimeout(t);if(stall)clearInterval(stall)}
-}
 async function thumbData(u){
  if(!u)return"";
  for(const c of [u,...PROXIES.map(p=>p(u))]){
@@ -1408,58 +1557,60 @@ async function thumbData(u){
  return"";
 }
 async function guardar(t,x){
- const rec={id:t.id,title:t.title,artist:t.artist,dur:t.dur||0,at:Date.now(),local:true,thumb:(await thumbData(t.thumb))||t.thumb,dl:true,...x};
+ const rec={id:t.id,title:t.title,artist:t.artist,dur:t.dur||0,at:Date.now(),local:true,thumb:(await thumbData(t.thumb))||t.thumb,dl:true,parcial:false,...x};
  try{await tx("readwrite",s=>s.put(rec))}catch(e){return toast("No hay espacio para guardar")}
  t.local=true;t.dl=true;
  await refresh();syncDl();
- toast("Guardada · ya suena sin internet");try{window.saveFile&&await window.saveFile(t)}catch(e){}
+ toast("Guardada · ya suena sin internet");
+ try{window.saveFile&&await window.saveFile(t)}catch(e){}
  if(cur&&cur.id===t.id)load(idx);
 }
 
 async function doDownload(t){
  if(!t)return toast("Elegí una canción primero");
  if(window.grabando&&window.grabando()){cortarGrabacion();return toast("Cortando grabación…")}
- if(busy)return;
+ if(busy){CANCEL=true;return toast("Deteniendo…")}
  if(t.local)return toast("Esa canción ya está guardada");
  if(dl.some(d=>d.id===t.id))return toast("Ya está en Descargas");
- busy=true;window.FIN=Date.now()+240000;
- btns.forEach(b=>{b.classList.add("busy");b.classList.remove("on")});
- const pct=(g,tot)=>toast("Descargando fragmentos… "+Math.min(99,Math.round(g/tot*100))+"%");
+ if(navigator.storage&&navigator.storage.persist)navigator.storage.persist().catch(()=>{});
+ try{
+  if(navigator.storage&&navigator.storage.estimate){
+   const e=await navigator.storage.estimate();
+   if((e.quota||0)-(e.usage||0)<25e6)return toast("Poco espacio libre en este dispositivo");
+  }
+ }catch(e){}
+ busy=true;CANCEL=false;ultPct=-1;window.FIN=Date.now()+300000;
+ btns.forEach(b=>{b.classList.add("busy");b.classList.remove("on");b.style.setProperty("--p","0%")});
  toast("Buscando fuente…");
  try{
-  const cands=[];
-  try{const u0=await window.__resolve(t.id);if(u0)cands.push(u0)}catch(e){}
-  try{const u1=await Promise.any(PIPED_API.map(async b=>{const j=await fj(`${b}/streams/${t.id}`,6000);
-    const a=(j.audioStreams||[]).filter(x=>x&&x.url&&!x.videoOnly).sort((x,y)=>(y.bitrate||0)-(x.bitrate||0));
-    if(!a.length)throw 0;return a[0].url}));if(u1&&!cands.includes(u1))cands.push(u1)}catch(e){}
-  for(const b of INV){for(const it of ["140","251"])cands.push(`${b}/latest_version?id=${t.id}&itag=${it}&local=true`)}
-  for(const u of cands){
-   if(Date.now()>window.FIN)break;
-   toast("Probando fuente "+(cands.indexOf(u)+1)+"/"+cands.length+"…");const tr=await window.elegir(u);
-   if(!tr)continue;
-   try{
-    if(tr.rangos){
-     const man=await window.segmentar(t,u,tr,pct);
-     if(man)return await guardar(t,man);
-    }else{
-     toast("Transporte sin rangos · bloque único…");
-     const man=await window.bloqueUnico(t,u,tr,pct);
-     if(man)return await guardar(t,man);
-    }
-   }catch(e){}
-  }
-  toast("Sin transporte · grabando en tiempo real…");
-  if(!(cur&&cur.id===t.id)){queue=[t];prevStack=[];load(0);await new Promise(r=>setTimeout(r,1600))}
+  const man=await descargar(t);
+  if(man)return await guardar(t,man);
+  toast("Las fuentes no dejaron bajar. Probando en tiempo real…");
+  if(!(cur&&cur.id===t.id)){queue=[t];prevStack=[];load(0);await sleep(1600)}
   const bl=await window.grabar(t);
   if(bl&&bl.size>15000)return await guardar(t,{blob:bl,type:bl.type});
-  toast("No se pudo descargar: los servidores bloquearon el acceso. Probá de nuevo en un rato.");
- }finally{busy=false;window.FIN=0;btns.forEach(b=>b.classList.remove("busy"));syncDl()}
+  toast("No se pudo descargar. Probá de nuevo en un rato.");
+ }catch(e){
+  toast(e&&e.cancelada?"Descarga detenida":"No se pudo descargar");
+ }finally{
+  busy=false;CANCEL=false;window.FIN=0;
+  btns.forEach(b=>b.classList.remove("busy"));syncDl();
+ }
 }
+$("#dlAll").onclick=async()=>{
+ const lista=$("#view-search").classList.contains("on")?(lists.search||[]):(lists[view==="dl"?"dl":"dl"]||dl);
+ const pend=(lista||[]).filter(t=>t&&!t.local&&!dl.some(d=>d.id===t.id));
+ if(!pend.length)return toast("No hay nada nuevo que descargar acá");
+ toast(pend.length+" en cola");
+ for(const t of pend){if(!busy)await doDownload(t);await sleep(700)}
+};
+$("#dlStop").onclick=()=>{CANCEL=true;toast("Deteniendo…")};
 
 const _sv=showView;
-showView=function(v){_sv(v);if(v==="dl"&&navigator.storage&&navigator.storage.persist)navigator.storage.persist().catch(()=>{})};
+showView=function(v){_sv(v);if(v==="dl")refresh()};
 const _l=load;
 load=function(i){_l(i);syncDl()};
+window.elegir=transporte;window.__resolve=id=>resolveURL(id,true);
 refresh();
 })();
 </script>
@@ -1528,7 +1679,7 @@ $("#snEq").innerHTML=Array.from({length:40},(_,i)=>{const c=Math.abs(i-19.5)/19.
  return `<i style="--t:${(.55+Math.random()*.7).toFixed(2)}s;--d:-${Math.random().toFixed(2)}s;max-height:${Math.round(8+(1-c)*18)}px"></i>`}).join("");
 /* cada canción tiñe la pantalla con su propio color */
 const _l4=load;load=function(i){_l4(i);if(!cur)return;let h=0;for(const c of cur.id)h=(h*31+c.charCodeAt(0))%360;
- const sn=$(".sn");sn.style.setProperty("--h1",h);sn.style.setProperty("--h2",(h+60)%360);sn.style.setProperty("--glow",`hsla(${h},85%,62%,.45)`)};
+ const sn=$(".sn");sn.style.setProperty("--h1",h);sn.style.setProperty("--h2",(h+60)%360);sn.style.setProperty("--glow",`hsla(${h},85%,62%,.45)`)}; 
 /* al terminar de descargar, el archivo también se guarda en el dispositivo */
 window.saveFile=async t=>{
  const rec=await tx("readonly",s=>s.get(t.id));if(!rec)return;

@@ -1692,6 +1692,127 @@ window.saveFile=async t=>{
 };
 })();
 </script>
+<script>
+(()=>{
+/* ===== video real por pista separada (estilo Mochy) ===== */
+const B=document.body;
+const origSync=window.syncVideo||(()=>{});
+let VIDON=true,busy=false;
+
+const V=document.createElement("video");
+V.id="cxvid";V.muted=true;V.playsInline=true;V.setAttribute("playsinline","");V.preload="none";
+document.body.appendChild(V);
+const css=document.createElement("style");
+css.textContent=`
+#cxvid{position:fixed;z-index:16;object-fit:cover;background:#000;border-radius:12px;display:none;pointer-events:none}
+body.sheet-on #cxvid{z-index:36}
+body.stage-on #cxvid{z-index:45;border-radius:0}
+body.cxvid #yt-host{display:none!important}`;
+document.head.appendChild(css);
+
+const INV2=["https://inv.nadeko.net","https://invidious.nerdvpn.de","https://yt.chocolatemoo53.com","https://iv.melmac.space","https://inv.tux.pizza","https://yewtu.be","https://invidious.f5.si"];
+const PIPED2=["https://pipedapi.kavin.rocks","https://pipedapi.adminforge.de","https://api.piped.private.coffee","https://pipedapi.drgns.space"];
+const PRX=[u=>u,
+ u=>"https://api.allorigins.win/raw?url="+encodeURIComponent(u),
+ u=>"https://api.codetabs.com/v1/proxy/?quest="+encodeURIComponent(u),
+ u=>"https://corsproxy.io/?url="+encodeURIComponent(u),
+ u=>"https://api.cors.lol/?url="+encodeURIComponent(u),
+ u=>"https://proxy.corsfix.com/?"+u];
+
+function place(){
+ if(!B.classList.contains("cxvid"))return;
+ if(B.classList.contains("stage-on")){V.style.cssText="display:block;left:0;top:0;width:100vw;height:100vh;border-radius:0";return}
+ const slot=B.classList.contains("sheet-on")?$("#sheetSlot"):(matchMedia("(max-width:780px)").matches?null:$("#vidslot"));
+ if(!slot||!slot.offsetParent){V.style.display="none";return}
+ const r=slot.getBoundingClientRect();
+ if(r.width<40){V.style.display="none";return}
+ V.style.cssText=`display:block;left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px`;
+}
+addEventListener("resize",place);
+setInterval(place,400);
+
+async function sonda(u){
+ const c=new AbortController(),tm=setTimeout(()=>c.abort(),9000);
+ try{
+  const r=await fetch(u,{mode:"cors",signal:c.signal,headers:{Range:"bytes=0-1"}});
+  if(!r.ok&&r.status!==206)return null;
+  const ct=(r.headers.get("content-type")||"").toLowerCase();
+  if(!/^video\/|octet-stream/.test(ct))return null;
+  const m=(r.headers.get("content-range")||"").match(/\/(\d+)/);
+  const total=m?+m[1]:+(r.headers.get("content-length")||0);
+  try{r.body&&r.body.cancel()}catch(e){}
+  if(total<80000)return null;
+  return {total};
+ }catch(e){return null}finally{clearTimeout(tm)}
+}
+async function transporte(u){
+ for(const p of PRX){const ok=await sonda(p(u));if(ok)return p}
+ return null;
+}
+async function candidatas(id){
+ const out=[];
+ for(const it of ["136","135","18","137","134","248","247","244"])
+  for(const h of INV2)out.push(`${h}/latest_version?id=${id}&itag=${it}&local=true`);
+ for(const b of PIPED2){
+  try{
+   const j=await fj(`${b}/streams/${id}`,6000);
+   (j.videoStreams||[]).filter(x=>x&&x.url)
+    .sort((x,y)=>(y.videoOnly?1:0)-(x.videoOnly?1:0))
+    .forEach(x=>out.push(x.url));
+  }catch(e){}
+ }
+ return out;
+}
+const VC=new Map();
+async function pick(id){
+ const cola=await candidatas(id);
+ const w=async()=>{while(cola.length){const u=cola.shift();const p=await transporte(u);if(p)return p(u)}return null};
+ const r=await Promise.all(Array.from({length:4},w));
+ return r.find(Boolean)||null;
+}
+
+window.syncVideo=async function(){
+ const on=VIDON&&cur&&!cur.local&&(B.classList.contains("stage-on")||B.classList.contains("sheet-on"));
+ if(!on){V.pause();B.classList.remove("cxvid");origSync();return}
+ B.classList.add("cxvid");place();
+ if(V.dataset.id===cur.id&&V.src)return;
+ if(busy)return;
+ const id=cur.id;
+ busy=true;
+ try{
+  if(!VC.has(id))VC.set(id,await pick(id));
+ }finally{busy=false}
+ const u=VC.get(id);
+ if(!u){B.classList.remove("cxvid");origSync();return}
+ if(!cur||cur.id!==id)return;
+ try{const y=window.ytCtl&&window.ytCtl();y&&y.pauseVideo&&y.pauseVideo()}catch(e){}
+ V.dataset.id=id;V.src=u;
+ try{await V.play();V.currentTime=adapter.getCurrentTime()||0}catch(e){}
+};
+V.onerror=()=>{
+ if(!V.dataset.id)return;
+ VC.delete(V.dataset.id);V.removeAttribute("src");V.dataset.id="";
+ if(cur)setTimeout(()=>window.syncVideo(),400);
+};
+
+/* el video sigue al audio, nunca al revés */
+setInterval(()=>{
+ if(!V.src||V.style.display==="none")return;
+ const t=adapter.getCurrentTime()||0;
+ if(playing){
+  if(V.paused)V.play().catch(()=>{});
+  if(Math.abs(t-V.currentTime)>.45)V.currentTime=t;
+ }else if(!V.paused)V.pause();
+},600);
+
+const xc=$("#x-clip");
+if(xc)xc.addEventListener("click",()=>{
+ VIDON=($("#x-clip span").textContent||"").trim()==="Sí";
+ setTimeout(()=>window.syncVideo(),0);
+});
+window.syncVideo();
+})();
+</script>
 
 
 

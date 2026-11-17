@@ -1697,10 +1697,11 @@ window.saveFile=async t=>{
 /* ===== video real por pista separada (estilo Mochy) ===== */
 const B=document.body;
 const origSync=window.syncVideo||(()=>{});
-let VIDON=true,busy=false;
+let VIDON=true,busy=false,SHOW=false;
 
 const V=document.createElement("video");
-V.id="cxvid";V.muted=true;V.playsInline=true;V.setAttribute("playsinline","");V.preload="none";
+V.id="cxvid";V.muted=true;V.defaultMuted=true;V.autoplay=true;V.playsInline=true;
+V.setAttribute("playsinline","");V.setAttribute("muted","");V.preload="auto";
 document.body.appendChild(V);
 const css=document.createElement("style");
 css.textContent=`
@@ -1719,8 +1720,12 @@ const PRX=[u=>u,
  u=>"https://api.cors.lol/?url="+encodeURIComponent(u),
  u=>"https://proxy.corsfix.com/?"+u];
 
+const MP4=!!V.canPlayType('video/mp4; codecs="avc1.42E01E"');
+const VP9=!!V.canPlayType('video/webm; codecs="vp9"');
+const ITAGS=MP4?["136","135","134","18","137"]:(VP9?["248","247","244","18"]:["18"]);
+
 function place(){
- if(!B.classList.contains("cxvid"))return;
+ if(!SHOW){V.style.display="none";return}
  if(B.classList.contains("stage-on")){V.style.cssText="display:block;left:0;top:0;width:100vw;height:100vh;border-radius:0";return}
  const slot=B.classList.contains("sheet-on")?$("#sheetSlot"):(matchMedia("(max-width:780px)").matches?null:$("#vidslot"));
  if(!slot||!slot.offsetParent){V.style.display="none";return}
@@ -1728,6 +1733,7 @@ function place(){
  if(r.width<40){V.style.display="none";return}
  V.style.cssText=`display:block;left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px`;
 }
+function aplicar(){B.classList.toggle("cxvid",SHOW);place()}
 addEventListener("resize",place);
 setInterval(place,400);
 
@@ -1735,24 +1741,24 @@ async function sonda(u){
  const c=new AbortController(),tm=setTimeout(()=>c.abort(),9000);
  try{
   const r=await fetch(u,{mode:"cors",signal:c.signal,headers:{Range:"bytes=0-1"}});
-  if(!r.ok&&r.status!==206)return null;
+  if(!r.ok&&r.status!==206)return false;
   const ct=(r.headers.get("content-type")||"").toLowerCase();
-  if(!/^video\/|octet-stream/.test(ct))return null;
+  if(!/^video\/|octet-stream/.test(ct))return false;
   const m=(r.headers.get("content-range")||"").match(/\/(\d+)/);
   const total=m?+m[1]:+(r.headers.get("content-length")||0);
   try{r.body&&r.body.cancel()}catch(e){}
-  if(total<80000)return null;
-  return {total};
- }catch(e){return null}finally{clearTimeout(tm)}
+  return total>80000;
+ }catch(e){return false}finally{clearTimeout(tm)}
 }
 async function transporte(u){
- for(const p of PRX){const ok=await sonda(p(u));if(ok)return p}
+ for(const p of PRX){if(await sonda(p(u)))return p}
  return null;
 }
+const CAND=new Map();
 async function candidatas(id){
+ if(CAND.has(id))return CAND.get(id);
  const out=[];
- for(const it of ["136","135","18","137","134","248","247","244"])
-  for(const h of INV2)out.push(`${h}/latest_version?id=${id}&itag=${it}&local=true`);
+ for(const it of ITAGS)for(const h of INV2)out.push(`${h}/latest_version?id=${id}&itag=${it}&local=true`);
  for(const b of PIPED2){
   try{
    const j=await fj(`${b}/streams/${id}`,6000);
@@ -1761,43 +1767,79 @@ async function candidatas(id){
     .forEach(x=>out.push(x.url));
   }catch(e){}
  }
+ CAND.set(id,out);
  return out;
 }
-const VC=new Map();
-async function pick(id){
- const cola=await candidatas(id);
- const w=async()=>{while(cola.length){const u=cola.shift();const p=await transporte(u);if(p)return p(u)}return null};
- const r=await Promise.all(Array.from({length:4},w));
- return r.find(Boolean)||null;
+
+/* espera imagen real, no solo "src puesto" */
+function esperar(){
+ return new Promise(res=>{
+  let fin=false;
+  const cerrar=v=>{if(fin)return;fin=true;clearTimeout(tm);
+   V.removeEventListener("loadeddata",si);V.removeEventListener("canplay",si);V.removeEventListener("error",no);res(v)};
+  const si=()=>cerrar(true), no=()=>cerrar(false);
+  const tm=setTimeout(()=>cerrar(false),9000);
+  V.addEventListener("loadeddata",si);V.addEventListener("canplay",si);V.addEventListener("error",no);
+ });
+}
+
+const MALAS=new Map();
+async function intentar(id){
+ const malas=MALAS.get(id)||new Set();MALAS.set(id,malas);
+ for(let n=0;n<4;n++){
+  if(!cur||cur.id!==id)return false;
+  const cola=(await candidatas(id)).filter(u=>!malas.has(u));
+  if(!cola.length)return false;
+  let url=null;
+  for(const u of cola.slice(0,6)){
+   const tr=await transporte(u);
+   if(tr){url=tr(u);break}
+   malas.add(u);
+  }
+  if(!url)return false;
+  V.src=url;
+  const listo=await esperar();
+  if(listo&&V.videoWidth>0&&V.videoHeight>0){
+   V.dataset.id=id;V.dataset.url=url;
+   return true;
+  }
+  malas.add(url);
+  V.removeAttribute("src");V.load();
+ }
+ return false;
 }
 
 window.syncVideo=async function(){
  const on=VIDON&&cur&&!cur.local&&(B.classList.contains("stage-on")||B.classList.contains("sheet-on"));
- if(!on){V.pause();B.classList.remove("cxvid");origSync();return}
- B.classList.add("cxvid");place();
- if(V.dataset.id===cur.id&&V.src)return;
+ if(!on){SHOW=false;aplicar();V.pause();origSync();return}
+ if(V.dataset.id===cur.id&&V.readyState>=2){SHOW=true;aplicar();return}
  if(busy)return;
  const id=cur.id;
  busy=true;
  try{
-  if(!VC.has(id))VC.set(id,await pick(id));
+  const ok=await intentar(id);
+  if(!cur||cur.id!==id)return;
+  if(ok){
+   SHOW=true;aplicar();
+   try{await V.play();V.currentTime=adapter.getCurrentTime()||0}catch(e){}
+   try{const y=window.ytCtl&&window.ytCtl();y&&y.pauseVideo&&y.pauseVideo()}catch(e){}
+  }else{
+   SHOW=false;aplicar();origSync();
+  }
  }finally{busy=false}
- const u=VC.get(id);
- if(!u){B.classList.remove("cxvid");origSync();return}
- if(!cur||cur.id!==id)return;
- try{const y=window.ytCtl&&window.ytCtl();y&&y.pauseVideo&&y.pauseVideo()}catch(e){}
- V.dataset.id=id;V.src=u;
- try{await V.play();V.currentTime=adapter.getCurrentTime()||0}catch(e){}
 };
+
 V.onerror=()=>{
  if(!V.dataset.id)return;
- VC.delete(V.dataset.id);V.removeAttribute("src");V.dataset.id="";
- if(cur)setTimeout(()=>window.syncVideo(),400);
+ const id=V.dataset.id;
+ (MALAS.get(id)||new Set()).add(V.dataset.url);
+ V.dataset.id="";SHOW=false;V.removeAttribute("src");V.load();
+ if(cur&&cur.id===id)setTimeout(()=>window.syncVideo(),300);
 };
 
 /* el video sigue al audio, nunca al revés */
 setInterval(()=>{
- if(!V.src||V.style.display==="none")return;
+ if(!SHOW||!V.src)return;
  const t=adapter.getCurrentTime()||0;
  if(playing){
   if(V.paused)V.play().catch(()=>{});
